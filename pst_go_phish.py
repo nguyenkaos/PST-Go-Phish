@@ -95,7 +95,10 @@ def compareMessage(folder, msg, eml_from, reply, return_path, ignore):
 					return
 			if from_domain != reply_domain:
 				suspicious = True
-				found_suspicious = "Reply-To"
+				if found_suspicious == "Return-Path":
+					found_suspicious = "Both"
+				else:
+					found_suspicious = "Reply-To"
 	
 	if suspicious is True:
 		suspicious_messages += 1
