@@ -6,12 +6,13 @@ import unicodecsv as csv
 
 
 message_list = []
+senders_dict = {}
 messages = 0
 compared_messages = 0
 suspicious_messages = 0
 ignored_messages = 0
 
-def main(pst_file, output_dir, ig):
+def main(pst_file, output_dir, ig, threshold):
 	print "[+] Accessing {} PST file..".format(pst_file)
 	pst = pypff.open(pst_file)
 	root = pst.get_root_folder()
@@ -20,22 +21,26 @@ def main(pst_file, output_dir, ig):
 		ignore = [x.strip().lower() for x in ig.split(',')]
 	else:
 		ignore = []
-	recursePST(root, ignore)
+	recursePST(root, ignore, threshold)
 	print "[+] Identified {} messages..".format(messages)
 	print "[+] Compared {} messages. Messages not compared were missing a FROM header or both Reply-To and Return-Path".format(compared_messages)
 	print "[+] Ignored {} comparable messages".format(ignored_messages)
 	print "[+] Identified {} suspicious messages..".format(suspicious_messages)
+
+	if threshold:
+		print "[+] Identifying senders complying with threshold limit"
+		senderThreshold(threshold)
 	csvWriter(output_dir)
 
 
-def recursePST(base, ignore):
+def recursePST(base, ignore, threshold):
 	for folder in base.sub_folders:
 		if folder.number_of_sub_folders:
-			recursePST(folder, ignore)
-		processMessages(folder, ignore)
+			recursePST(folder, ignore, threshold)
+		processMessages(folder, ignore, threshold)
 
 
-def processMessages(folder, ignore):
+def processMessages(folder, ignore, threshold):
 	global messages
 	print "[+] Processing Folder: {}".format(folder.name)
 	for message in folder.sub_messages:
@@ -56,13 +61,13 @@ def processMessages(folder, ignore):
 		if eml_from == "" or (replyto == "" and returnpath == ""):
 			# No FROM value or no Reply-To / Return-Path value
 			continue
-		
-		compareMessage(folder, message, eml_from, replyto, returnpath, ignore)  
+
+		compareMessage(folder, message, eml_from, replyto, returnpath, ignore, threshold)  
 
 
 
-def compareMessage(folder, msg, eml_from, reply, return_path, ignore):
-	global message_list, compared_messages, suspicious_messages, ignored_messages
+def compareMessage(folder, msg, eml_from, reply, return_path, ignore, threshold):
+	global message_list, senders_dict, compared_messages, suspicious_messages, ignored_messages
 	compared_messages += 1
 	reply_email = ''
 	return_email = ''
@@ -99,7 +104,12 @@ def compareMessage(folder, msg, eml_from, reply, return_path, ignore):
 					found_suspicious = "Both"
 				else:
 					found_suspicious = "Reply-To"
-	
+	if threshold:
+		if from_email in senders_dict:
+			senders_dict[from_email][0] += 1
+		else:
+			senders_dict[from_email] = [1, folder.name, msg.get_subject(), msg.get_sender_name(), msg.number_of_attachments, from_email, return_email, reply_email]
+
 	if suspicious is True:
 		suspicious_messages += 1
 		message_list.append([folder.name, msg.get_subject(), msg.get_sender_name(), msg.number_of_attachments, from_email, return_email, reply_email, found_suspicious])
@@ -111,12 +121,25 @@ def emailExtractor(item):
 		stop = item.find(">")
 		email = item[start:stop]
 	else:
-		email = item.split(":")[1].strip()
+		email = item.split(":")[1].strip().replace('"', "")
 	if "@" not in email:
 		domain = False
 	else:
-		domain = email.split("@")[1]
+		domain = email.split("@")[1].replace('"', "")
 	return email, domain
+
+
+def senderThreshold(threshold):
+	global message_list, senders_dict
+	sender_count = 0
+	for sender in senders_dict:
+		if not senders_dict[sender][0] > 1:
+			sender_count += 1
+			tmp_list = senders_dict[sender][1:]
+			tmp_list.append("Threshold")
+			message_list.append(tmp_list)
+	print "[+] Identified {} senders equal to the threshold".format(sender_count)
+
 
 
 def csvWriter(output_dir):
@@ -133,13 +156,14 @@ if __name__ == '__main__':
 	parser.add_argument("PST_FILE", help="File path to input PST file")
 	parser.add_argument("OUTPUT_DIR", help="Output Dir for CSV")
 	parser.add_argument("-i", "--ignore", help="Comma-delimited acceptable emails to ignore e.g. (bounce lists, etc.)")
+	parser.add_argument("-t", "--threshold", action="store_true", help="Flag emails where sender has only sent 1 email")
 	args = parser.parse_args()
 	
 	if not os.path.exists(args.OUTPUT_DIR):
 		os.makedirs(args.OUTPUT_DIR)
 	
 	if os.path.exists(args.PST_FILE) and os.path.isfile(args.PST_FILE):
-		main(args.PST_FILE, args.OUTPUT_DIR, args.ignore)
+		main(args.PST_FILE, args.OUTPUT_DIR, args.ignore, args.threshold)
 	else:
 		print "[-] Input PST {} does not exist or is not a file".format(args.PST_FILE)
 		sys.exit(1)
