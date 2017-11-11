@@ -225,7 +225,6 @@ def senderThreshold(threshold):
 
 
 def linkThreshold(threshold):
-	import pdb; pdb.set_trace()
 	global message_list, links_dict
 	link_count = 0
 	for link in links_dict:
