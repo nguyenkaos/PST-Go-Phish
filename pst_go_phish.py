@@ -1,49 +1,105 @@
+from __future__ import print_function
 import argparse
 import os
-import pypff
+import re
 import sys
-import unicodecsv as csv
+from utility.csv_writer import csv_writer
 
+try:
+    import pypff
+except ImportError:
+    print("[+] Install the libpff Python bindings to use this script")
+    sys.exit(1)
+
+try:
+    import tldextract
+except ImportError:
+    print("[+] Install the tldextract module to use this script")
+    sys.exit(2)
+
+try:
+    import tqdm
+except ImportError:
+    print("[+] Install the tqdm module to use this script")
+    sys.exit(3)
+
+"""
+    PST-Go-Phish - Automatically find suspicious emails.
+    Copyright (C) 2017  Preston Miller
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
 
 message_list = []
 senders_dict = {}
+links_dict = {}
 messages = 0
 compared_messages = 0
 suspicious_messages = 0
 ignored_messages = 0
+no_body_messages = 0
 
-def main(pst_file, output_dir, ig, threshold):
-	print "[+] Accessing {} PST file..".format(pst_file)
+link_regex = re.compile(
+    r'^(?:http|ftp)s?://'  # http:// or https://
+    r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  # domain...
+    r'localhost|'  # localhost...
+    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|'  # ...or ipv4
+    r'\[?[A-F0-9]*:[A-F0-9:]+\]?)'  # ...or ipv6
+    r'(?::\d+)?'  # optional port
+    r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+
+def main(pst_file, output_dir, ig, threshold, links):
+	print("[+] Accessing {} PST file..".format(pst_file))
 	pst = pypff.open(pst_file)
 	root = pst.get_root_folder()
-	print "[+] Traversing PST folder structure.."
+	print("[+] Traversing PST folder structure..")
 	if ig is not None:
 		ignore = [x.strip().lower() for x in ig.split(',')]
 	else:
 		ignore = []
-	recursePST(root, ignore, threshold)
-	print "[+] Identified {} messages..".format(messages)
-	print "[+] Compared {} messages. Messages not compared were missing a FROM header or both Reply-To and Return-Path".format(compared_messages)
-	print "[+] Ignored {} comparable messages".format(ignored_messages)
-	print "[+] Identified {} suspicious messages..".format(suspicious_messages)
+	recursePST(root, ignore)
+	print("[+] Identified {} messages..".format(messages))
+	print("[+] Compared {} messages. Messages not compared were missing a FROM header or both Reply-To and Return-Path".format(compared_messages))
+	print("[+] Ignored {} comparable messages".format(ignored_messages))
+	print("[+] {} Messages without bodies to check for links".format(no_body_messages))
+	print("[+] Identified {} suspicious messages..".format(suspicious_messages))
 
-	if threshold:
-		print "[+] Identifying senders complying with threshold limit"
-		senderThreshold(threshold)
-	csvWriter(output_dir)
+	print("[+] Identifying emails complying with sender threshold limit of {}".format(threshold))
+	senderThreshold(threshold)
+
+	print("[+] Identifying emails complying with link threshold limit of {}".format(links))
+	linkThreshold(links)
+
+        global message_list
+        headers = ["Folder", "Subject", "Sender", "Attachments", "From Email", "Return-Path", "Reply-To", "Flag"]
+        print("[+] Writing {} results to CSV in {}".format(len(message_list), output_dir))
+	csv_writer(message_list, headers, output_dir)
 
 
-def recursePST(base, ignore, threshold):
+def recursePST(base, ignore):
 	for folder in base.sub_folders:
 		if folder.number_of_sub_folders:
-			recursePST(folder, ignore, threshold)
-		processMessages(folder, ignore, threshold)
+			recursePST(folder, ignore)
+		processMessages(folder, ignore)
 
 
-def processMessages(folder, ignore, threshold):
+def processMessages(folder, ignore):
 	global messages
-	print "[+] Processing Folder: {}".format(folder.name)
-	for message in folder.sub_messages:
+	print("[+] Processing {} Folder with {} messages".format(folder.name, folder.number_of_sub_messages))
+	if folder.number_of_sub_messages == 0:
+		return
+	for message in tqdm.tqdm(folder.sub_messages, desc="Processing", unit="emails"):
 		eml_from, replyto, returnpath = ("", "", "")
 		messages += 1
 		try:
@@ -62,12 +118,12 @@ def processMessages(folder, ignore, threshold):
 			# No FROM value or no Reply-To / Return-Path value
 			continue
 
-		compareMessage(folder, message, eml_from, replyto, returnpath, ignore, threshold)  
+		compareMessage(folder, message, eml_from, replyto, returnpath, ignore)  
 
 
 
-def compareMessage(folder, msg, eml_from, reply, return_path, ignore, threshold):
-	global message_list, senders_dict, compared_messages, suspicious_messages, ignored_messages
+def compareMessage(folder, msg, eml_from, reply, return_path, ignore):
+	global message_list, senders_dict, links_dict, compared_messages, suspicious_messages, ignored_messages, no_body_messages
 	compared_messages += 1
 	reply_email = ''
 	return_email = ''
@@ -75,6 +131,7 @@ def compareMessage(folder, msg, eml_from, reply, return_path, ignore, threshold)
 	return_bool = False
 	suspicious = False
 	found_suspicious = ""
+	links = []
 	from_email, from_domain = emailExtractor(eml_from)
 	if reply != "":
 		reply_bool = True
@@ -104,11 +161,26 @@ def compareMessage(folder, msg, eml_from, reply, return_path, ignore, threshold)
 					found_suspicious = "Both"
 				else:
 					found_suspicious = "Reply-To"
-	if threshold:
-		if from_email in senders_dict:
-			senders_dict[from_email][0] += 1
+	if from_email in senders_dict:
+		senders_dict[from_email][0] += 1
+	else:
+		senders_dict[from_email] = [1, folder.name, msg.get_subject(), msg.get_sender_name(), msg.number_of_attachments, from_email, return_email, reply_email]
+
+	if msg.html_body is None:
+		if msg.plain_text_body is None:
+			if msg.rtf_body is None:
+				no_body_messages += 1
+			else:
+				links = linkExtractor(msg.rtf_body, "rtf")
 		else:
-			senders_dict[from_email] = [1, folder.name, msg.get_subject(), msg.get_sender_name(), msg.number_of_attachments, from_email, return_email, reply_email]
+			links = linkExtractor(msg.plain_text_body, "text")
+	else:
+		links = linkExtractor(msg.html_body, "html")
+	for link in links:
+		if link in links_dict:
+			links_dict[link][0] += 1
+		else:
+			links_dict[link] = [1, folder.name, msg.get_subject(), msg.get_sender_name(), msg.number_of_attachments, from_email, return_email, reply_email]
 
 	if suspicious is True:
 		suspicious_messages += 1
@@ -129,26 +201,41 @@ def emailExtractor(item):
 	return email, domain
 
 
+def linkExtractor(body, body_type):
+	links = []
+	if body_type == "html":
+		urls = re.findall(r'href=[\'"]?([^\'" >]+)', body)
+	elif body_type == "text":
+		urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', body)
+	else:
+		urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', body)
+	return set(tldextract.extract(x).registered_domain for x in urls)
+
+
 def senderThreshold(threshold):
 	global message_list, senders_dict
 	sender_count = 0
 	for sender in senders_dict:
-		if not senders_dict[sender][0] > 1:
+		if not senders_dict[sender][0] > threshold:
 			sender_count += 1
 			tmp_list = senders_dict[sender][1:]
-			tmp_list.append("Threshold")
+			tmp_list.append("Sender Threshold")
 			message_list.append(tmp_list)
-	print "[+] Identified {} senders equal to the threshold".format(sender_count)
+	print("[+] Identified {} senders less than or equal to the threshold".format(sender_count))
 
 
+def linkThreshold(threshold):
+	import pdb; pdb.set_trace()
+	global message_list, links_dict
+	link_count = 0
+	for link in links_dict:
+		if not links_dict[link][0] > threshold:
+			link_count += 1
+			tmp_list = links_dict[link][1:]
+			tmp_list.append("Link Threshold")
+			message_list.append(tmp_list)
+	print("[+] Identified {} emails with links less than or equal to the threshold".format(link_count))
 
-def csvWriter(output_dir):
-	global message_list
-	headers = ["Folder", "Subject", "Sender", "Attachments", "From Email", "Return-Path", "Reply-To", "Flag"]
-	with open(os.path.join(output_dir, "go_phish.csv"), "wb") as csvfile:
-		csv_writer = csv.writer(csvfile)
-		csv_writer.writerow(headers)
-		csv_writer.writerows(message_list)
 
 if __name__ == '__main__':
 	# Command-line Argument Parser
@@ -156,14 +243,15 @@ if __name__ == '__main__':
 	parser.add_argument("PST_FILE", help="File path to input PST file")
 	parser.add_argument("OUTPUT_DIR", help="Output Dir for CSV")
 	parser.add_argument("-i", "--ignore", help="Comma-delimited acceptable emails to ignore e.g. (bounce lists, etc.)")
-	parser.add_argument("-t", "--threshold", action="store_true", help="Flag emails where sender has only sent 1 email")
+	parser.add_argument("-t", "--threshold", type=int, default=1, help="Flag emails where sender has only sent N email to the mailbox (default 1)")
+	parser.add_argument("-l", "--links", type=int, default=1, help="Flag emails where the link has only sent/received N times (default 1)")
 	args = parser.parse_args()
 	
 	if not os.path.exists(args.OUTPUT_DIR):
 		os.makedirs(args.OUTPUT_DIR)
 	
 	if os.path.exists(args.PST_FILE) and os.path.isfile(args.PST_FILE):
-		main(args.PST_FILE, args.OUTPUT_DIR, args.ignore, args.threshold)
+		main(args.PST_FILE, args.OUTPUT_DIR, args.ignore, args.threshold, args.links)
 	else:
-		print "[-] Input PST {} does not exist or is not a file".format(args.PST_FILE)
-		sys.exit(1)
+		print("[-] Input PST {} does not exist or is not a file".format(args.PST_FILE))
+		sys.exit(4)
