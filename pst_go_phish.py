@@ -225,7 +225,7 @@ def linkThreshold(threshold):
 			tmp_list = links_dict[link][1:]
 			tmp_list.append("Link Threshold")
 			message_list.append(tmp_list)
-	print("[+] Identified {} emails with links less than or equal to the threshold".format(link_count))
+	print("[+] Identified {} domains less than or equal to the threshold".format(link_count))
 
 
 if __name__ == '__main__':
