@@ -4,6 +4,12 @@ import os
 import re
 import sys
 from utility.csv_writer import csv_writer
+import sys
+reload(sys)
+sys.setdefaultencoding('utf8')
+
+
+
 
 try:
     import pypff
