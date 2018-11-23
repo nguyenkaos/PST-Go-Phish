@@ -8,9 +8,7 @@ This script takes a PST or OST file as its input and an output directory. You ca
 usage:
      parse_pstost.py PST_FILE OUTPUT_DIR
 
-PST Go Phishing..
-
-positional arguments:
+Arguments:
   PST_FILE              File path to input PST/OST file
   OUTPUT_DIR            Output Dir for CSV
 ~~~
